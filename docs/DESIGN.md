@@ -210,9 +210,45 @@ force = (ov_sig != old_sig) or (bool(ov_sig) and not os.path.isfile(out))
 - **常见安装位置** `C:\Program Files\UGS`、`D:\UGS`、`F:/G:/H:\UGS` 等
 - **环境变量** `UGII_BASE_DIR`
 - **Mayo**：`Program Files\Fougue\Mayo`、PATH
-- **OCP Python**：包内 `.venv` → 系统 python（用 `import OCP` 试）
+- **OCP Python**（逐级探测，每个候选都过版本兼容校验）：
+  1. 显式配置 / `PRT_PREVIEW_OCP_PYTHON`
+  2. 包内 `.venv`（`install.ps1` 建的）
+  3. PATH 上的 `python` / `python3`
+  4. **NX 安装根旁边的 OCP 环境**（`ocpenv`、`python` venv）
 
 探测全部失败时返回空，由调用方弹可读提示，而不是抛栈。
+
+### OCP 版本兼容校验：为什么不能只测 `import OCP`
+
+`import OCP` 成功 ≠ 语义分组能跑。老版本 OCP（7.7 及以前）没有 `OCP.collections`
+模块，而 `semantic_group.py` / `group_step.py` 的 `from OCP.collections import
+Sequence_TDF_Label` 会直接 `ModuleNotFoundError`。
+
+失败的表现很隐蔽：转换成功、文件能打开，但**没有智能分组**，静默退化成
+「所有零件平铺在树里」。用户以为程序坏了。
+
+因此 `_has_ocp()` 同时验证：
+
+```python
+import OCP, OCP.collections, OCP.STEPCAFControl
+from OCP.TCollection import TCollection_ExtendedString
+```
+
+任一缺失即判定该解释器不可用，继续往下一个候选找。
+
+### 安装策略：先探测，后安装
+
+`cadquery-ocp` 约 200MB，是安装链路里唯一耗时的一步。很多同事机器上已经有
+可用环境（自己建的 venv、NX 旁边的 `ocpenv`、公司统一镜像的 Python 库），
+重复下载既慢又占空间。
+
+`install.ps1` 因此先调 `prt_config.py --print-ocp` 拿探测结果，命中就复用；
+探测不到才建虚拟环境拉包。`--print-ocp` 只往 stdout 打一行路径，不掺日志，
+避免 PowerShell 侧解析歧义。
+
+`disable_ocp` 与「探测不到」是两个不同语义：
+- 探测不到 → 继续自动找下一个候选
+- `disable_ocp: true` → 用户明确不要用，直接放弃（`-SkipOcp` 会置位）
 
 ---
 

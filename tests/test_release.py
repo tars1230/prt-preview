@@ -87,12 +87,23 @@ _BAD_PATTERNS = [
     "D:" + chr(92) + "UGS" + chr(92) + "cache",
     "C:" + chr(92) + "Users" + chr(92) + "Administrator",
 ]
-src_files = [f for f in os.listdir(ROOT) if f.endswith(".py")]
+# ⚠️ 显式列出**发布包应有的文件**，而不是扫目录里所有 .py。
+# 开发树里还堆着 analyze_ugpart.py / ca_test.py / export_step.py 等本机专用脚本，
+# 它们含本机绝对路径是正常的（不发布）。扫全目录会让本测试在开发树上误报，
+# 掩盖真正的问题 —— 测试必须只对「实际交付物」负责。
+RELEASE_PY = [
+    "prt2mayo.py", "prt_config.py", "semantic_group.py",
+    "group_step.py", "reg_menu.py", "gen_test_part.py",
+]
 hardcoded = []
-for fn in src_files:
+missing = []
+for fn in RELEASE_PY:
+    p = os.path.join(ROOT, fn)
+    if not os.path.isfile(p):
+        missing.append(fn)
+        continue
     if fn in EXEMPT_FILES:
         continue
-    p = os.path.join(ROOT, fn)
     try:
         with open(p, encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
@@ -101,6 +112,7 @@ for fn in src_files:
                         hardcoded.append(f"{fn}:{i}")
     except OSError:
         pass
+check("发布源码齐备", not missing, "缺: " + ", ".join(missing))
 check("源码无本机硬编码路径", not hardcoded, "; ".join(hardcoded[:5]))
 
 # 配置覆盖机制：环境变量应能覆盖

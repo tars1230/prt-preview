@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     1. 复制程序到安装目录（默认 %LOCALAPPDATA%\PRT-Preview）
-    2. 建立 Python 虚拟环境并安装 cadquery-ocp（语义分组依赖）
+    2. 准备 OCP 运行环境（先探测复用本机已有的，没有才新建 venv 装）
     3. 写 config.json
     4. 注册 .prt 右键菜单
     5. 跑一次自检
@@ -13,6 +13,7 @@
     powershell -ExecutionPolicy Bypass -File install.ps1
     powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir "D:\Tools\PRT-Preview" -NxBase "D:\UGS\NX2.0"
     powershell -ExecutionPolicy Bypass -File install.ps1 -SkipOcp      # 不装 OCP（无智能分组）
+    powershell -ExecutionPolicy Bypass -File install.ps1 -ForceOcp    # 强制重装 OCP（不复用已有）
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +22,8 @@ param(
     [string]$Mayo = "",
     [string]$LicenseServer = "",
     [switch]$SkipOcp,
-    [switch]$SkipMenu
+    [switch]$SkipMenu,
+    [switch]$ForceOcp
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,41 +117,80 @@ if (Test-Path (Join-Path $Src "docs")) {
 }
 Write-Host "      已复制 $copied 项到 $InstallDir" -ForegroundColor Gray
 
-# ---------------------------------------------------------------- 3. 虚拟环境 + OCP
+# ---------------------------------------------------------------- 3. OCP 环境
+# 策略：**先探测、后安装**。
+# 很多同事机器上已经有可用的 OCP 环境（自己建的 venv、NX 旁边的 ocpenv、
+# 公司统一镜像的 Python 库），此时直接复用，省掉 200MB 下载和几分钟安装。
+# 探测逻辑由 prt_config.discover_ocp_python() 统一实现（含 OCP.collections
+# 版本兼容校验），这里只调用它，不重复实现。
 $VenvPy = Join-Path $InstallDir ".venv\Scripts\python.exe"
-if (-not $SkipOcp) {
-    Write-Host "[3/5] 建立虚拟环境并安装 cadquery-ocp（较大，约 200MB）..." -ForegroundColor Green
-    if (-not (Test-Path $VenvPy)) {
-        & $py.Exe -m venv (Join-Path $InstallDir ".venv")
-    }
-    $pipArgs = @("-m", "pip", "install", "--upgrade", "pip")
-    & $VenvPy @pipArgs
-    # 走代理（国内直连 PyPI 慢）
-    $proxy = $env:HTTP_PROXY
-    if (-not $proxy) { $proxy = $env:HTTPS_PROXY }
-    if ($proxy) {
-        Write-Host "      使用代理: $proxy" -ForegroundColor Gray
-        & $VenvPy -m pip install --proxy $proxy "cadquery-ocp>=8.0,<9.0" numpy
-    } else {
-        & $VenvPy -m pip install "cadquery-ocp>=8.0,<9.0" numpy
-    }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[!] cadquery-ocp 安装失败。" -ForegroundColor Yellow
-        Write-Host "    可稍后手动执行：" -ForegroundColor Yellow
-        Write-Host "    $VenvPy -m pip install cadquery-ocp numpy" -ForegroundColor Yellow
-        Write-Host "    （未装 OCP 时，智能分组不可用，其余功能正常）" -ForegroundColor Yellow
-    } else {
-        # 验证 OCP 是否**真的可用**（不只 import OCP，还要 OCP.collections）
-        & $VenvPy -c "import OCP, OCP.collections; print('OCP OK')"
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "      OCP 安装完成且可用" -ForegroundColor Green
-        } else {
-            Write-Host "[!] OCP 已安装但不可用（缺 OCP.collections，版本过旧）。" -ForegroundColor Yellow
-            Write-Host "    升级： $VenvPy -m pip install --upgrade cadquery-ocp" -ForegroundColor Yellow
+$OcpPy = ""
+
+function Test-OcpUsable {
+    param([string]$Exe)
+    if (-not $Exe) { return $false }
+    if (-not (Test-Path $Exe)) { return $false }
+    try {
+        & $Exe -c "import OCP, OCP.collections; print('ok')" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
+
+if ($SkipOcp) {
+    Write-Host "[3/5] 跳过 OCP 安装（-SkipOcp）" -ForegroundColor Yellow
+} else {
+    # 3a. 复用已有环境
+    if (-not $ForceOcp) {
+        Write-Host "[3/5] 探测本机已有的 OCP 环境..." -ForegroundColor Green
+        $probe = Join-Path $InstallDir "prt_config.py"
+        $found = ""
+        if (Test-Path $probe) {
+            try {
+                $found = & $py.Exe $probe --print-ocp 2>$null
+                if ($found) { $found = ([string]$found).Trim() }
+            } catch { $found = "" }
+        }
+        if ($found -and (Test-OcpUsable $found)) {
+            $OcpPy = $found
+            Write-Host "      复用已有 OCP 环境: $OcpPy" -ForegroundColor Green
+            Write-Host "      （如需强制重装，加 -ForceOcp）" -ForegroundColor Gray
         }
     }
-} else {
-    Write-Host "[3/5] 跳过 OCP 安装（-SkipOcp）" -ForegroundColor Yellow
+
+    # 3b. 没有可复用的才建 venv 装
+    if (-not $OcpPy) {
+        Write-Host "[3/5] 建立虚拟环境并安装 cadquery-ocp（较大，约 200MB）..." -ForegroundColor Green
+        if (-not (Test-Path $VenvPy)) {
+            & $py.Exe -m venv (Join-Path $InstallDir ".venv")
+        }
+        $pipArgs = @("-m", "pip", "install", "--upgrade", "pip")
+        & $VenvPy @pipArgs
+        # 走代理（国内直连 PyPI 慢）
+        $proxy = $env:HTTP_PROXY
+        if (-not $proxy) { $proxy = $env:HTTPS_PROXY }
+        if ($proxy) {
+            Write-Host "      使用代理: $proxy" -ForegroundColor Gray
+            & $VenvPy -m pip install --proxy $proxy "cadquery-ocp>=8.0,<9.0" numpy
+        } else {
+            & $VenvPy -m pip install "cadquery-ocp>=8.0,<9.0" numpy
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[!] cadquery-ocp 安装失败。" -ForegroundColor Yellow
+            Write-Host "    可稍后手动执行：" -ForegroundColor Yellow
+            Write-Host "    $VenvPy -m pip install cadquery-ocp numpy" -ForegroundColor Yellow
+            Write-Host "    （未装 OCP 时，智能分组不可用，其余功能正常）" -ForegroundColor Yellow
+        } else {
+            # 验证 OCP 是否**真的可用**（不只 import OCP，还要 OCP.collections）
+            & $VenvPy -c "import OCP, OCP.collections; print('OCP OK')"
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "      OCP 安装完成且可用" -ForegroundColor Green
+                $OcpPy = $VenvPy
+            } else {
+                Write-Host "[!] OCP 已安装但不可用（缺 OCP.collections，版本过旧）。" -ForegroundColor Yellow
+                Write-Host "    升级： $VenvPy -m pip install --upgrade cadquery-ocp" -ForegroundColor Yellow
+            }
+        }
+    }
 }
 
 # ---------------------------------------------------------------- 4. 配置
@@ -158,7 +199,8 @@ $cfgPath = Join-Path $InstallDir "config.json"
 $cfg = [ordered]@{
     nx_base            = $NxBase
     mayo               = $Mayo
-    ocp_python         = $(if ($SkipOcp) { "" } else { $VenvPy })
+    ocp_python         = $OcpPy
+    disable_ocp        = $SkipOcp.IsPresent
     cache_dir          = ""
     license_server     = $(if ($LicenseServer) { $LicenseServer } else { "27000@localhost" })
     license_dir        = ""

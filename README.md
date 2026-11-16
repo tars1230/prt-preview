@@ -46,7 +46,12 @@
    powershell -ExecutionPolicy Bypass -File install.ps1
    ```
 
-   脚本会自动：建立 Python 虚拟环境 → 安装 `cadquery-ocp` → 写配置文件 → 注册右键菜单 → 跑自检。
+   脚本会自动：探测并复用本机已有的 OCP 环境（没有才建虚拟环境安装 `cadquery-ocp`）→ 写配置文件 → 注册右键菜单 → 跑自检。
+
+   > **关于 `cadquery-ocp`（约 200MB）**：这是「智能分组」的依赖，也是安装里唯一耗时的一步。
+   > 脚本**先探测本机已有环境**（自己建的 venv、NX 旁边的 `ocpenv`、PATH 上的 python），
+   > 命中就直接复用，**不下载**。只有真的找不到才新建虚拟环境拉包。
+   > 嫌慢可以加 `-SkipOcp` —— 只是没有智能分组，其余功能完全正常。
 
 3. **重启资源管理器**（或按 `F5`），之后在任意 `.prt` 文件上右键，就能看到 4 个新菜单项。
 
@@ -67,6 +72,9 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -LicenseServer "27000@licen
 
 # 不装 OCP（跳过「智能分组查看」，其余功能正常，包体小很多）
 powershell -ExecutionPolicy Bypass -File install.ps1 -SkipOcp
+
+# 强制重装 OCP（不复用已探测到的环境）
+powershell -ExecutionPolicy Bypass -File install.ps1 -ForceOcp
 ```
 
 ---
@@ -80,6 +88,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -SkipOcp
   "nx_base": "D:\\UGS\\NX2.0",
   "mayo": "C:\\Program Files\\Fougue\\Mayo\\mayo.exe",
   "ocp_python": "C:\\PRT-Preview\\.venv\\Scripts\\python.exe",
+  "disable_ocp": false,
   "cache_dir": "",
   "license_server": "27000@localhost",
   "license_dir": "",
@@ -90,6 +99,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -SkipOcp
 
 - 留空 = 自动探测（注册表 → 常见安装位置 → PATH）。
 - 也可以用环境变量覆盖：`PRT_PREVIEW_NX_BASE`、`PRT_PREVIEW_MAYO`、`PRT_PREVIEW_OCP_PYTHON`、`PRT_PREVIEW_CACHE_DIR`、`PRT_PREVIEW_LICENSE_SERVER`。
+- `disable_ocp: true` = 明确「不要用 OCP」，与「探测不到」是两回事（探测不到还会继续自动找）。
 
 ### ⚠️ 关于 `license_autostart`
 

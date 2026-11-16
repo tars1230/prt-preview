@@ -36,6 +36,9 @@ DEFAULTS = {
     # 需要时在 config.json 里显式打开并填 license_dir。
     "license_autostart": False,
     "register_menu": True,
+    # 显式关闭 OCP（安装时 --SkipOcp 置位）。
+    # 与「探测不到」区分：探测不到可以继续自动找，关掉就是明确的「不要用」。
+    "disable_ocp": False,
 }
 
 
@@ -183,6 +186,31 @@ def discover_mayo():
 
 
 # ------------------------------------------------------------------ 探测：OCP python
+def _nx_adjacent_dirs():
+    """NX 安装根的同级目录（UGS 装在 D:\\UGS\\NX2.0 时返回 D:\\UGS）。
+
+    UGS 生态里团队常在 NX 旁边放一个装好 OCP 的 venv（ocpenv）供二次开发用，
+    复用它可以省掉一次 200MB 的 pip 下载。
+    """
+    bases = []
+    nx = os.environ.get("UGII_BASE_DIR") or os.environ.get("UGII_ROOT_DIR")
+    if nx and _is_dir(nx):
+        bases.append(os.path.abspath(nx))
+    try:
+        bases.extend(_registry_nx_bases())
+        bases.extend(_scan_nx_bases())
+    except Exception:
+        pass
+    out = []
+    for b in bases:
+        if not b:
+            continue
+        parent = os.path.dirname(os.path.abspath(b))
+        if parent and parent not in out:
+            out.append(parent)
+    return out
+
+
 def _has_ocp(python_exe):
     """检查该解释器是否有**可用**的 OCP。
 
@@ -264,6 +292,17 @@ def discover_ocp_python(verbose=False):
                 return hit
     except Exception:
         pass
+
+    # 4) NX 安装根旁边的 OCP 环境（ocpenv / python venv）
+    for base in _nx_adjacent_dirs():
+        for rel in (("ocpenv", "Scripts", "python.exe"),
+                    ("ocpenv", "Scripts", "pythonw.exe"),
+                    ("python", "Scripts", "python.exe"),
+                    ("python", "bin", "python.exe")):
+            cand = os.path.join(base, *rel)
+            hit = _try(cand, "NX 旁环境无兼容 OCP")
+            if hit:
+                return hit
 
     if verbose:
         for t in tried:
@@ -350,7 +389,7 @@ def load(explicit=None):
         cfg["nx_base"] = discover_nx_base()
     if not cfg.get("mayo"):
         cfg["mayo"] = discover_mayo()
-    if not cfg.get("ocp_python"):
+    if not cfg.get("ocp_python") and not cfg.get("disable_ocp"):
         cfg["ocp_python"] = discover_ocp_python()
     if not cfg.get("cache_dir"):
         cfg["cache_dir"] = discover_cache_dir()
@@ -401,6 +440,13 @@ def doctor(cfg=None):
 
 
 def main():
+    # --print-ocp：只输出探测到的 OCP 解释器路径，供安装脚本复用决策用。
+    # 单独输出，不掺日志，避免 PowerShell 侧解析歧义。
+    if "--print-ocp" in sys.argv:
+        cfg = load()
+        print(cfg.get("ocp_python") or "")
+        return 0
+
     cfg = load()
     print("PRT-Preview 配置自检")
     print("=" * 58)

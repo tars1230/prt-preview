@@ -1,29 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+﻿__pycache__/
+*.pyc
+*.pyo
 .venv/
-venv/
-
-# 本工具运行产物
 config.json
-*.semantic_map.json
-*.ovstamp
 *.log
 *.stp
-*.step
 *.igs
-*.igsb
 *.prt
-probe_result.json
-
-# 打包产物
-build/
-dist/
-
-# 编辑器
-.vscode/
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
