@@ -1,0 +1,12 @@
+# PRT-Preview 运行依赖
+#
+# 只有「智能分组查看」需要 OCP（OpenCascade Python 绑定）。
+# 「转为 STEP / IGES」与「用 Mayo 查看」不需要任何第三方包 ——
+# 转换用的是 NX 自带的 step214ug.exe / iges.exe，看图用外部 Mayo。
+#
+# 安装（推荐由 install.ps1 自动完成）：
+#   python -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements.txt
+
+cadquery-ocp>=8.0,<9.0
+numpy>=1.24
