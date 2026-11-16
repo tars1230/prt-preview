@@ -1,0 +1,30 @@
+{
+  "_说明": "PRT-Preview 配置。复制为 config.json 后按需修改；所有项留空则自动探测。",
+
+  "nx_base": "",
+  "_nx_base": "NX 安装根目录，必须包含 UGII / STEP214UG / IGES 子目录。例：\"D:\\\\UGS\\\\NX2.0\"。留空则自动从注册表和常见安装位置探测。",
+
+  "mayo": "",
+  "_mayo": "Mayo 看图程序路径。例：\"C:\\\\Program Files\\\\Fougue\\\\Mayo\\\\mayo.exe\"。留空则自动探测。",
+
+  "ocp_python": "",
+  "_ocp_python": "装有 cadquery-ocp 的 Python 解释器路径。例：\"C:\\\\PRT-Preview\\\\.venv\\\\Scripts\\\\python.exe\"。留空则依次探测：显式环境变量 → 包内 venv → PATH 上的 python → NX 安装根旁边的 ocpenv 环境。",
+
+  "disable_ocp": false,
+  "_disable_ocp": "true = 明确不要用 OCP（智能分组不可用，其余功能正常）。与「探测不到」不同：探测不到还会继续自动找。安装时用 -SkipOcp 会自动置为 true。",
+
+  "cache_dir": "",
+  "_cache_dir": "转换缓存目录。留空则用 %LOCALAPPDATA%\\\\PRTPreview\\\\cache。",
+
+  "license_server": "27000@localhost",
+  "_license_server": "NX 许可服务器地址。同事若连公司许可服务器，改成实际地址即可。",
+
+  "license_dir": "",
+  "_license_dir": "本地 FlexLM 目录（内含 lmgrd.exe / lmutil.exe / ugnx2.lic）。仅在需要本机自愈时填。",
+
+  "license_autostart": false,
+  "_license_autostart": "许可服务不可用时是否自动拉起 lmgrd。默认关闭 —— 擅自拉起可能与公司正式许可服务器冲突。仅在本机确实用本地许可时开启。",
+
+  "register_menu": true,
+  "_register_menu": "安装脚本是否注册 .prt 右键菜单。"
+}
