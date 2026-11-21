@@ -150,7 +150,8 @@ def uglmd_up():
         return port_license_open()
     try:
         p = subprocess.run([lmutil, "lmstat", "-c", _LICENSE_SERVER],
-                           capture_output=True, timeout=20)
+                           capture_output=True, timeout=20,
+                           creationflags=_NO_WINDOW)
         out = (p.stdout or b"").decode("utf-8", errors="replace")
         return "uglmd: UP" in out
     except Exception:
@@ -176,9 +177,11 @@ def ensure_license():
         return False
     log("许可不可用，静默拉起 lmgrd ...")
     DETACHED = 0x00000008
+    # DETACHED_PROCESS 本身就不分配控制台（CREATE_NO_WINDOW 在此组合下会被
+    # Windows 忽略）；保留 _NO_WINDOW 只为表达意图，并对旧系统边界情况兜底。
     subprocess.Popen(
         [lmgrd, "-c", lic, "-l", os.path.join(LICDIR, "auto.log")],
-        cwd=LICDIR, creationflags=DETACHED, close_fds=True)
+        cwd=LICDIR, creationflags=DETACHED | _NO_WINDOW, close_fds=True)
     deadline = time.time() + 60
     while time.time() < deadline:
         time.sleep(3)
@@ -192,8 +195,10 @@ def ensure_license():
 def restart_license():
     if not _LICENSE_AUTOSTART:
         return False
-    subprocess.run(["taskkill", "/F", "/IM", "lmgrd.exe", "/T"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "uglmd.exe", "/T"], capture_output=True)
+    subprocess.run(["taskkill", "/F", "/IM", "lmgrd.exe", "/T"], capture_output=True,
+                   creationflags=_NO_WINDOW)
+    subprocess.run(["taskkill", "/F", "/IM", "uglmd.exe", "/T"], capture_output=True,
+                   creationflags=_NO_WINDOW)
     time.sleep(2)
     return ensure_license()
 
@@ -253,7 +258,8 @@ def _run_chain(fmt, chain, prt, out):
             "o=" + out, "l=" + tmp_log, "d=" + os.path.join(stepdir, deffile)]
     try:
         log(f"转换开始[{tag}]: {' '.join(args)}")
-        p = subprocess.run(args, cwd=stepdir, env=env, capture_output=True, timeout=600)
+        p = subprocess.run(args, cwd=stepdir, env=env, capture_output=True, timeout=600,
+                           creationflags=_NO_WINDOW)
     finally:
         # 清理临时副本（缓存 key 按原始路径算，下次需要会重新复制）
         if src != prt and os.path.exists(src):
@@ -375,11 +381,21 @@ def ensure_semantic(step_path):
     stem = os.path.splitext(os.path.basename(step_path))[0]
     out = os.path.join(CACHE, f"{stem}_{key}_sem.stp")
     mapf = os.path.splitext(out)[0] + ".semantic_map.json"
-    args = [OCP_PY, SEMANTIC, step_path, out]
     # 人工标注用「内容签名」判定是否重建，不靠 map 文件 mtime：
     # 重跑时 map 会被重写，mtime 永远比 out 新，用 mtime 会每次都白跑 70s；
     # 且分组失败时 out 不更新，用 mtime 会陷入无限重试。
     stamp = out + ".ovstamp"
+    # 语义分组器直接写目标文件时，进程被杀/磁盘满会留下半个 STEP，
+    # 下次被误当成缓存。改用同目录临时文件，成功后原子替换，旧缓存不会被破坏。
+    tmp_out = out + f".partial_{os.getpid()}.stp"
+    tmp_map = os.path.splitext(tmp_out)[0] + ".semantic_map.json"
+    for stale in (tmp_out, tmp_map):
+        try:
+            if os.path.exists(stale):
+                os.remove(stale)
+        except OSError:
+            pass
+    args = [OCP_PY, SEMANTIC, step_path, tmp_out]
     ov_sig = ""
     if os.path.isfile(mapf):
         try:
@@ -422,17 +438,36 @@ def ensure_semantic(step_path):
         log("语义分组器: " + so[-500:].replace("\n", " | "))
         if se.strip():
             log("语义分组器 stderr: " + se[-300:].replace("\n", " | "))
-        ok = os.path.exists(out) and os.path.getsize(out) > 1024
-        try:
-            # 成功/失败、有标注/清空标注都写 stamp（空签名也写）：
-            # 否则清空标注后 old_sig 永远非空，每次打开都误判「签名又变了」白跑一次重建
-            with open(stamp, "w", encoding="utf-8") as f:
-                f.write(ov_sig)
-        except OSError:
-            pass
+        ok = (p.returncode == 0 and os.path.exists(tmp_out)
+              and os.path.getsize(tmp_out) > 1024)
+        if ok:
+            try:
+                # map 文件与临时 STEP 一起提交；旧成品保持可用直到这一刻。
+                if os.path.exists(tmp_map):
+                    os.replace(tmp_map, mapf)
+                os.replace(tmp_out, out)
+                # 成功/失败、有标注/清空标注都写 stamp（空签名也写）：
+                # 否则清空标注后 old_sig 永远非空，每次打开都误判「签名又变了」白跑一次重建
+                with open(stamp, "w", encoding="utf-8") as f:
+                    f.write(ov_sig)
+            except OSError:
+                ok = False
+        if not ok:
+            for stale in (tmp_out, tmp_map):
+                try:
+                    if os.path.exists(stale):
+                        os.remove(stale)
+                except OSError:
+                    pass
         log(f"语义分组完成 ok={ok} rc={p.returncode}")
         return out if ok else None
     except Exception:
+        for stale in (tmp_out, tmp_map):
+            try:
+                if os.path.exists(stale):
+                    os.remove(stale)
+            except OSError:
+                pass
         log("语义分组异常:\n" + traceback.format_exc())
         return None
 

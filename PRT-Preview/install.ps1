@@ -213,14 +213,17 @@ Write-Host "      $cfgPath" -ForegroundColor Gray
 # ---------------------------------------------------------------- 5. 右键菜单
 if (-not $SkipMenu) {
     Write-Host "[5/5] 注册 .prt 右键菜单..." -ForegroundColor Green
-    $regPy = $VenvPy
+    # 右键菜单必须使用**实际通过 OCP 兼容校验的解释器**，不能只用 PATH
+    # 上的 Python（它可能没有 OCP，点「智能分组」会静默退化）。
+    $regPy = $OcpPy
+    if (-not (Test-Path $regPy)) { $regPy = $VenvPy }
     if (-not (Test-Path $regPy)) { $regPy = $py.Exe }
     # 右键菜单要用 pythonw（无控制台窗口）
     $regPyw = Join-Path (Split-Path -Parent $regPy) "pythonw.exe"
     if (-not (Test-Path $regPyw)) {
         $regPyw = Join-Path (Split-Path -Parent $py.Exe) "pythonw.exe"
     }
-    if (-not (Test-Path $regPyw)) { $regPyw = $py.Exe }
+    if (-not (Test-Path $regPyw)) { $regPyw = $regPy }
     Push-Location $InstallDir
     try {
         & $regPy (Join-Path $InstallDir "reg_menu.py") --python $regPyw
@@ -234,7 +237,8 @@ if (-not $SkipMenu) {
 # ---------------------------------------------------------------- 自检
 Write-Host ""
 Write-Host "运行自检..." -ForegroundColor Cyan
-$checkPy = $VenvPy
+$checkPy = $OcpPy
+if (-not (Test-Path $checkPy)) { $checkPy = $VenvPy }
 if (-not (Test-Path $checkPy)) { $checkPy = $py.Exe }
 Push-Location $InstallDir
 try {

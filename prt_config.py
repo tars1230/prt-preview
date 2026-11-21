@@ -230,7 +230,8 @@ def _has_ocp(python_exe):
     try:
         import subprocess
         p = subprocess.run([python_exe, "-c", probe],
-                           capture_output=True, timeout=90)
+                           capture_output=True, timeout=90,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return p.returncode == 0
     except Exception:
         return False
@@ -245,7 +246,8 @@ def ocp_version(python_exe):
         p = subprocess.run(
             [python_exe, "-c",
              "import importlib.metadata as m;print(m.version('cadquery-ocp'))"],
-            capture_output=True, timeout=60)
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if p.returncode == 0:
             return (p.stdout or b"").decode("utf-8", "replace").strip()
     except Exception:

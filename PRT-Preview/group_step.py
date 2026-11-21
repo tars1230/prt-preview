@@ -113,14 +113,21 @@ def main():
 
     labels = Sequence_TDF_Label()
     st_src.GetFreeShapes(labels)
-    root_shape = st_src.GetShape_s(labels.Value(1))
+    roots = [st_src.GetShape_s(labels.Value(i))
+             for i in range(1, labels.Size() + 1)
+             if not st_src.GetShape_s(labels.Value(i)).IsNull()]
+    if not roots:
+        print("没有自由形状")
+        return 1
 
+    # 多 free-shape STEP 不能只取第一个，否则会静默漏掉独立产品。
     solids = []
-    ex = TopExp_Explorer(root_shape, TopAbs_ShapeEnum.TopAbs_SOLID)
-    while ex.More():
-        solids.append(ex.Current())
-        ex.Next()
-    print(f"solids: {len(solids)}")
+    for root_shape in roots:
+        ex = TopExp_Explorer(root_shape, TopAbs_ShapeEnum.TopAbs_SOLID)
+        while ex.More():
+            solids.append(ex.Current())
+            ex.Next()
+    print(f"free_shapes: {len(roots)}, solids: {len(solids)}")
     if len(solids) < 8:
         print("实体太少，无需分组")
         return 0

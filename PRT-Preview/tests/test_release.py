@@ -51,10 +51,11 @@ def find_ocp_python():
     cfg = prt_config.load()
     if cfg.get("ocp_python") and os.path.isfile(cfg["ocp_python"]):
         return cfg["ocp_python"]
+    # 与发布配置使用同一套兼容校验，不能只测 import OCP：老版本缺
+    # OCP.collections 时语义分组仍会崩。
     for exe in sys.executable, "python", "python3":
         try:
-            p = subprocess.run([exe, "-c", "import OCP"], capture_output=True, timeout=60)
-            if p.returncode == 0:
+            if prt_config._has_ocp(exe):
                 return exe
         except Exception:
             pass
@@ -185,6 +186,21 @@ if ok_gen:
         print(f"      原始: {t0}  {dict(c0)}")
         print(f"      缩放: {t1}  {dict(c1)}")
 
+        # 旋转坐标轴：真实 STEP 不保证 Z 轴是产品竖直方向。
+        # 只交换特征记录的轴，不重新读写文件，专门验证方向自适应规则。
+        rotated = copy.deepcopy(recs)
+        perm = (2, 1, 0)
+        for r_ in rotated:
+            d0, c0_ = r_["dim"], r_["ctr"]
+            nd = [d0[i] for i in perm]
+            nc = [c0_[i] for i in perm]
+            r_["dim"], r_["ctr"] = nd, nc
+            r_["bb"] = ([nc[i] - nd[i] / 2 for i in range(3)] +
+                        [nc[i] + nd[i] / 2 for i in range(3)])
+        c_rot, t_rot = classify(rotated)
+        check("交换坐标轴后分类不变", c_rot == c0 and t_rot == t0,
+              f"{t0}/{dict(c0)} -> {t_rot}/{dict(c_rot)}")
+
         # 第三例：压扁成板类结构，验证中性角色模板切换
         flat = copy.deepcopy(recs)
         for r_ in flat:
@@ -211,6 +227,15 @@ if ok_gen:
     r = sh(OCP, os.path.join(ROOT, "semantic_group.py"), zh_in, zh_out)
     ok = r.returncode == 0 and os.path.isfile(zh_out) and os.path.getsize(zh_out) > 1024
     check("中文空格路径读写 STEP", ok,
+          (r.stderr or b"").decode("utf-8", "replace")[-250:])
+
+    # 纯曲面/面模型：没有 solid 也应能生成可查看的语义结果，不能直接判坏文件。
+    face_in = os.path.join(WORK, "surface_only.step")
+    face_out = os.path.join(WORK, "surface_only_sem.step")
+    r = sh(OCP, gen, face_in, "1", "--no-solid")
+    r = sh(OCP, os.path.join(ROOT, "semantic_group.py"), face_in, face_out)
+    ok = r.returncode == 0 and os.path.isfile(face_out) and os.path.getsize(face_out) > 1024
+    check("纯曲面模型可生成查看结果", ok,
           (r.stderr or b"").decode("utf-8", "replace")[-250:])
 
 # ================================================================ D 回退链

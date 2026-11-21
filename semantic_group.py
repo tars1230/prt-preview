@@ -74,6 +74,20 @@ def bbox(shape):
             b.GetXMax(), b.GetYMax(), b.GetZMax()]
 
 
+def _free_shapes(st):
+    """返回 STEP 中全部自由形状，不能只取 labels.Value(1)。
+
+    很多 STEP 是单一 product，但板件、钣金展开件、外部参照或多产品导出
+    可能有多个 free shape。只读第一个会悄悄漏件，最终树看起来像「分组成功」
+    但数量不完整。
+    """
+    labels = Sequence_TDF_Label()
+    st.GetFreeShapes(labels)
+    return [st.GetShape_s(labels.Value(i))
+            for i in range(1, labels.Size() + 1)
+            if not st.GetShape_s(labels.Value(i)).IsNull()]
+
+
 def color_of(ct, shape):
     col = Quantity_Color()
     for typ in (XCAFDoc_ColorType.XCAFDoc_ColorSurf,
@@ -98,18 +112,38 @@ def extract(src):
     rdr.Transfer(doc)
     st = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
     ct = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
-    labels = Sequence_TDF_Label()
-    st.GetFreeShapes(labels)
-    if labels.Size() < 1:
+    roots = _free_shapes(st)
+    if not roots:
         raise ValueError("STEP 中没有可读取的自由形状（文件损坏或格式不符）")
-    root = st.GetShape_s(labels.Value(1))
-    print(f"[read] {time.time()-t0:.1f}s", flush=True)
+    print(f"[read] {time.time()-t0:.1f}s free_shapes={len(roots)}", flush=True)
 
+    # 不能只读取第一个 free shape：多产品 STEP、钣金展开件和外部参照
+    # 经常把多个独立产品放在同一个文件中。
     solids = []
-    ex = TopExp_Explorer(root, TopAbs_ShapeEnum.TopAbs_SOLID)
-    while ex.More():
-        solids.append(ex.Current())
-        ex.Next()
+    for root in roots:
+        ex = TopExp_Explorer(root, TopAbs_ShapeEnum.TopAbs_SOLID)
+        while ex.More():
+            solids.append(ex.Current())
+            ex.Next()
+
+    # 纯壳体/面模型没有 SOLID，但仍然是有效的 CAD 几何。先收集 SHELL，
+    # 让后续走低置信度的几何分组，而不是误报「0 个实体」。
+    representation = "SOLID"
+    if not solids:
+        representation = "SHELL"
+        for root in roots:
+            ex = TopExp_Explorer(root, TopAbs_ShapeEnum.TopAbs_SHELL)
+            while ex.More():
+                solids.append(ex.Current())
+                ex.Next()
+    # 某些曲面导出只有 FACE，没有 SHELL；仍保留为可查看对象。
+    if not solids:
+        representation = "FACE"
+        for root in roots:
+            ex = TopExp_Explorer(root, TopAbs_ShapeEnum.TopAbs_FACE)
+            while ex.More():
+                solids.append(ex.Current())
+                ex.Next()
 
     recs = []
     vp, sp = GProp_GProps(), GProp_GProps()
@@ -142,8 +176,64 @@ def extract(src):
             "thin": round(dsort[0]/dsort[2], 6) if dsort[2] > 0 else 0,
             "color": col,
         })
-    print(f"[features] {len(solids)} solids, {time.time()-t0:.1f}s", flush=True)
+    # 无实体体积的壳体/面模型，用面积与包围盒体积构造一个仅用于排序和
+    # 相对阈值的 proxy mass；真实 Volume 仍保留为 0，避免伪造测量数据。
+    if recs:
+        model_s = max((max(r["dim"]) for r in recs), default=1.0) or 1.0
+        for r in recs:
+            box_vol = max(math.prod(max(v, 0.0) for v in r["dim"]), 1e-30)
+            if r["vol"] > 1e-30:
+                r["mass"] = r["vol"]
+            else:
+                r["mass"] = max(r["area"] * max(model_s * 1e-3, min(r["dim"]) * 0.25),
+                                 box_vol * 1e-3, 1e-30)
+            # 仅按 bbox 会把「同外形但有孔/空腔」的零件错误合并。
+            # 这两个粗特征只用于指纹分组，不作为测量结果对外展示。
+            r["fill"] = min(max(r["vol"] / box_vol, 0.0), 1.0)
+            box_area = max(2.0 * (r["dim"][0] * r["dim"][1]
+                                  + r["dim"][0] * r["dim"][2]
+                                  + r["dim"][1] * r["dim"][2]), 1e-30)
+            r["area_density"] = min(max(r["area"] / box_area, 0.0), 20.0)
+            r["representation"] = representation
+    print(f"[features] {len(solids)} {representation.lower()}s, {time.time()-t0:.1f}s", flush=True)
     return solids, recs, st, ct, doc
+
+
+def estimate_vertical_axis(recs, GD):
+    """估计模型的竖直轴，避免把任意朝向的产品都当成 Z-up。
+
+    STEP 不保证导出坐标系的 Z 轴就是产品竖直方向。对 X/Y/Z 三个候选轴，
+    统计「水平大薄板」和「竖直大薄板」证据；只有证据明显时才旋转语义判断，
+    对近似立方体/证据不足的零件保持传统 Z 轴，避免凭空改变结果。
+    """
+    if not recs or len(GD) != 3:
+        return 2
+    scores = []
+    S = max(GD) or 1.0
+    for a in range(3):
+        h = [k for k in range(3) if k != a]
+        vspan = GD[a]
+        h0, h1 = GD[h[0]], GD[h[1]]
+        score = 3.0 if vspan > 1.25 * max(h0, h1) else 0.0
+        shelves = 0
+        panels = 0
+        for r in recs:
+            d = r["dim"]
+            if (d[a] < 0.08 * S and d[h[0]] > 0.25 * h0
+                    and d[h[1]] > 0.25 * h1):
+                shelves += 1
+            thin_h = min(d[h[0]], d[h[1]])
+            if (thin_h < 0.04 * S and d[a] > 0.6 * max(vspan, 1e-30)
+                    and max(d[h[0]], d[h[1]]) > 0.15 * max(h0, h1)):
+                panels += 1
+        score += shelves * 2.0 + panels
+        scores.append((score, a, shelves, panels))
+    scores.sort(reverse=True)
+    best = scores[0]
+    # 证据不足或并列时维持历史 Z-up 行为。
+    if best[0] < 3.0 or (len(scores) > 1 and best[0] - scores[1][0] < 1.0):
+        return 2
+    return best[1]
 
 
 def infer_product(recs):
@@ -156,20 +246,26 @@ def infer_product(recs):
     g0 = [min(r["bb"][k] for r in recs) for k in range(3)]
     g1 = [max(r["bb"][k+3] for r in recs) for k in range(3)]
     GD = [g1[k]-g0[k] for k in range(3)]
-    W, D, H = GD
     S = max(GD)
     if S <= 0 or not all(math.isfinite(v) for v in GD):
         return "退化模型", GD, ["包围盒无效（零尺寸或非有限值）"]
+
+    vertical_axis = estimate_vertical_axis(recs, GD)
+    for r in recs:
+        r["vertical_axis"] = vertical_axis
+    haxes = [k for k in range(3) if k != vertical_axis]
+    W, D, H = GD[haxes[0]], GD[haxes[1]], GD[vertical_axis]
     span = max(W, D) or S
-    ev = []
-    horiz = [r for r in recs if min(range(3), key=lambda k: r["dim"][k]) == 2
-             and r["dim"][2] < 0.08 * S
-             and r["dim"][0] > 0.25 * W and r["dim"][1] > 0.25 * D]
+    ev = [f"竖直轴: {'XYZ'[vertical_axis]}"]
+    horiz = [r for r in recs
+             if r["dim"][vertical_axis] < 0.08 * S
+             and r["dim"][haxes[0]] > 0.25 * W
+             and r["dim"][haxes[1]] > 0.25 * D]
     pairs = sum(1 for g in fingerprint_groups(recs, S).values()
                 if len(g) == 2 and max(g[0]["dim"]) > 0.5 * S)
     tall = H > 1.4 * max(W, D)
     flat = min(GD) < 0.15 * S
-    ev.append(f"整体尺寸 {W:.4g}×{D:.4g}×{H:.4g} 模型单位（高/宽比 {H/span:.2f}）")
+    ev.insert(0, f"整体尺寸 {W:.4g}×{D:.4g}×{H:.4g} 模型单位（高/宽比 {H/span:.2f}）")
     ev.append(f"水平大薄板 {len(horiz)} 件（多层内部层架特征）")
     ev.append(f"成对镜像大件 {pairs} 组（双门/双壳特征）")
     if tall and len(horiz) >= 6:
@@ -196,7 +292,12 @@ def fingerprint_groups(recs, S=None):
     tiny = max((S ** 3) * 1e-12, 1e-30)
     by_dim = defaultdict(list)
     for r in recs:
-        by_dim[tuple(round(v / q) for v in sorted(r["dim"]))].append(r)
+        dims = tuple(round(v / q) for v in sorted(r["dim"]))
+        # 2% 的填充率、0.2 的表面积密度量化能区分同 bbox 的实心件/开孔件，
+        # 同时对 STEP 数值噪声保持容忍。没有这些字段时兼容旧 map/测试数据。
+        fill_bin = round(r.get("fill", 0.0) / 0.02)
+        area_bin = round(r.get("area_density", 0.0) / 0.2)
+        by_dim[dims + (fill_bin, area_bin)].append(r)
     grp = {}
     for k, g in by_dim.items():
         g = sorted(g, key=lambda x: x["vol"])
@@ -207,10 +308,10 @@ def fingerprint_groups(recs, S=None):
                     base = r["vol"]
                 cur.append(r)
             else:
-                grp[f"{k[0]}_{k[1]}_{k[2]}|{sub}"] = cur
+                grp[f"{k[0]}_{k[1]}_{k[2]}_{k[3]}_{k[4]}|{sub}"] = cur
                 sub += 1
                 cur, base = [r], r["vol"]
-        grp[f"{k[0]}_{k[1]}_{k[2]}|{sub}"] = cur
+        grp[f"{k[0]}_{k[1]}_{k[2]}_{k[3]}_{k[4]}|{sub}"] = cur
     return grp
 
 
@@ -220,10 +321,13 @@ def classify(recs, GD, override=None, ptype=""):
     全部阈值相对化（S = 最长边, env_vol = 包络体积），与文件大小/单位无关。
     ptype 决定用柜类语义名还是中性角色名。
     """
-    tot = sum(r["vol"] for r in recs) or 1.0
+    tot = sum(r.get("mass", r["vol"]) for r in recs) or 1.0
     S = max(GD) or 1.0
     env_vol = max(GD[0] * GD[1] * GD[2], S ** 3 * 1e-12, 1e-30)
-    vol_small = 5e-5 * env_vol          # 原绝对阈值 100000 mm³ 的相对等价
+    vol_small = 5e-5 * env_vol          # 原绝对阈值 100000mm³ 的相对等价
+    vertical_axis = recs[0].get("vertical_axis", 2) if recs else 2
+    haxes = [k for k in range(3) if k != vertical_axis]
+    GDv = [GD[haxes[0]], GD[haxes[1]], GD[vertical_axis]]
     is_cabinet = ("柜" in (ptype or "")) or ("方舱" in (ptype or ""))
     labels = ({k: v[0] for k, v in ROLES.items()}
               if is_cabinet else GENERIC_LABELS)
@@ -234,39 +338,46 @@ def classify(recs, GD, override=None, ptype=""):
     for key, g in ordered:
         rep = max(g, key=lambda x: x["vol"])
         n = len(g)
-        dim = rep["dim"]
+        raw_dim = rep["dim"]
+        # 把估计的竖直轴映射到局部 [宽,深,高]，后续规则不再硬编码 Z-up。
+        dim = [raw_dim[haxes[0]], raw_dim[haxes[1]], raw_dim[vertical_axis]]
         dsort = sorted(dim)
         t_ax = min(range(3), key=lambda k: dim[k])
         big = dsort[2]
         role, conf, why = "INTERNAL", 0.5, "默认内部件"
 
         # 1) 主体大件：体积占比 > 12% 且尺寸覆盖最长轴 80% 以上
-        if rep["vol"] / tot > 0.12 and big > 0.8 * S:
-            role, conf, why = "SHELL", 0.95, "体积占比>12%且覆盖主体尺度"
+        mass = rep.get("mass", rep["vol"])
+        if mass / tot > 0.12 and big > 0.8 * S:
+            role, conf, why = "SHELL", 0.95, "体积/面积占比>12%且覆盖主体尺度"
         # 2) 竖直大薄板（柜类=门板）：相对最长轴判定，与单位无关
         elif (t_ax in (0, 1) and dim[t_ax] < 0.04 * S
-              and dim[2] > 0.6 * S and dsort[1] > 0.15 * S):
-            role, conf, why = "DOOR", 0.9, "竖直大薄板+成对镜像"
+              and dim[2] > 0.6 * GDv[2] and dsort[1] > 0.15 * S):
+            role, conf, why = "DOOR", (0.9 if n >= 2 else 0.72), \
+                ("竖直大薄板+成对镜像" if n >= 2 else "竖直大薄板")
         # 3) 大面板：尺寸接近主体
-        elif (rep["thin"] < 0.08 and dsort[1] > 0.5 * min(GD[0], GD[1])
+        elif (rep["thin"] < 0.08 and dsort[1] > 0.5 * min(GDv[0], GDv[1])
               and dsort[2] > 0.5 * S):
             role, conf, why = "PANEL", 0.8, "大面积薄板且尺寸接近主体"
         # 4) 水平板件（柜类=层板）
         elif (t_ax == 2 and dim[2] < 0.08 * S
-              and dim[0] > 0.25 * GD[0] and dim[1] > 0.25 * GD[1]):
-            role, conf, why = "SHELF", 0.9, "水平大薄板+Z向分层"
+              and dim[0] > 0.25 * GDv[0] and dim[1] > 0.25 * GDv[1]):
+            role, conf, why = "SHELF", 0.9, "水平大薄板+相对竖直轴分层"
         # 5) 细长杆件
         elif dsort[0] < 0.05 * S and dsort[2] > 0.4 * S:
             role, conf, why = "FRAME", 0.8, "细长杆件/立柱"
-        # 6) 小型重复件：阈值 = 包络体积的 5e-5（原 100000mm³ 的相对等价）
-        elif n >= 3 and rep["vol"] < vol_small:
+        # 6) 小型重复件：阈值 = 包络体积的 5e-5（壳体用 proxy mass）
+        elif n >= 3 and mass < vol_small:
             role, conf, why = "HARDWARE", 0.85, f"同型件×{n}且小体积"
         # 7) 同型组件：重复但不小
         elif n >= 3:
             role, conf, why = "REPEAT", 0.7, f"同型件×{n}"
-        elif rep["vol"] / tot > 0.005:
+        elif mass / tot > 0.005:
             role, conf, why = "INTERNAL", 0.6, "非重复中大件"
 
+        if rep.get("representation") == "SHELL":
+            conf *= 0.7
+            why += "（壳体几何，置信度降级）"
         for r in g:
             r["role"], r["conf"], r["why"] = role, conf, why
             r["label"] = labels[role]
@@ -407,12 +518,15 @@ def build_tree(st, solids, recs, groups, title):
                 add_named(st, rnode, lab, nm, uda)
                 total_nodes += 1
             rest = [r for _, g in subs_sorted[39:] for r in g]
-            # Z 分桶宽度按整体尺度的 1/10，不能写死 200mm（米级单位会全落一桶）
+            # 分桶宽度按整体尺度的 1/10，不能写死 200mm（米级单位会全落一桶）。
+            # 使用产品识别阶段选出的竖直轴，而不是硬编码全局 Z。
             S = max((max(r["dim"]) for r in recs), default=0.0) or 1.0
+            vertical_axis = recs[0].get("vertical_axis", 2) if recs else 2
             zb = S / 10.0
             zs = defaultdict(list)
             for r in rest:
-                zs[int(r["ctr"][2] // zb)].append(r)
+                # 用识别出的竖直轴做分层；任意朝向 STEP 不再强行按全局 Z 切。
+                zs[int(r["ctr"][vertical_axis] // zb)].append(r)
             for zi, g in sorted(zs.items()):
                 lab = st.AddShape(make_compound(solids, [r["i"] for r in g]), False)
                 nm = f"{cn} Z层{zi} ({len(g)}件)"
@@ -496,17 +610,25 @@ def main():
                 existing_ov = json.load(f).get("overrides") or {}
         except Exception:
             pass
+    # --map 可能指向旧的正式 map，而本次输出写入临时路径；
+    # 必须把传入标注带到新 map，否则原子提交后标注签名会丢失，
+    # 下一次「成品不存在重试」就会回到自动分类。
+    if override:
+        existing_ov = override
     payload = {
         "source": os.path.basename(src),
         "product_type": ptype,
         "global_dim": [float(v) for v in GD],   # 单位是 STEP 自己的单位，不假设 mm
+        "vertical_axis": recs[0].get("vertical_axis", 2),
+        "representation": recs[0].get("representation", "SOLID"),
         "unit_agnostic": True,                  # 所有判据均为相对比例
         "roles": {k: v[0] for k, v in ROLES.items()},
         "labels_used": "cabinet" if "柜" in ptype or "方舱" in ptype else "generic",
         "overrides": existing_ov,  # {"<solid index>": "ROLE_KEY"} 手工改这里，重跑不会丢
         "records": [{k: r[k] for k in
-                     ("i", "dim", "ctr", "vol", "color", "role", "label",
-                      "conf", "why", "sig_n")}
+                     ("i", "dim", "ctr", "vol", "mass", "color", "role", "label",
+                      "conf", "why", "sig_n", "vertical_axis", "representation")
+                     if k in r}
                     for r in recs],
     }
     with open(out_map, "w", encoding="utf-8") as f:
